@@ -15,255 +15,46 @@ import numpy
 from pylearn2.utils.iteration import resolve_iterator_class, RandomUniformSubsetIterator
 from pylearn2.datasets.dataset import Dataset
 from pylearn2.space import CompositeSpace, VectorSpace, IndexSpace
-from research.code.pylearn2.space import (
-    VectorSequenceSpace,
-    IndexSequenceSpace
-)
+#from research.code.pylearn2.space import (
+#    VectorSequenceSpace,
+#    IndexSequenceSpace
+#)
 from pylearn2.utils import serial
 from pylearn2.utils import safe_zip
-from research.code.scripts.segmentaxis import segment_axis
-from research.code.pylearn2.utils.iteration import FiniteDatasetIterator
+from segmentaxis import segment_axis
+from iteration import FiniteDatasetIterator
+from pylearn2.datasets import DenseDesignMatrix
 import scipy.stats
 
-class TIMITOnTheFly(Dataset):
-    """
-    Frame-based TIMIT dataset
-    """
-    _default_seed = (17, 2, 946)
-
-    # Mean and standard deviation of the acoustic samples from the whole
-    # dataset (train, valid, test).
-    _mean = 0.0035805809921434142
-    _std = 542.48824133746177
-
-    def __init__(self, which_set, frame_length,
-                 overlap=0,
-                 frames_per_example=1,
-                 output_frames_per_example=1,
-                 start=0, stop=None, audio_only=False,
-                 rng=_default_seed,
-                 noise = False,
-                 noise_decay = False,
+class TIMITData(object):
+    def __init__(self,
+                 which_set,
+                 start=0,
+                 stop=None,
+                 audio_only=False,
                  speaker_filter = None,
                  phone_filter = None,
-                 mid_third = False):
-        """
-        Parameters
-        ----------
-        which_set : str
-            Either "train", "valid" or "test"
-        frame_length : int
-            Number of acoustic samples contained in a frame
-        overlap : int, optional
-            Number of overlapping acoustic samples for two consecutive frames.
-            Defaults to 0, meaning frames don't overlap.
-        frames_per_example : int, optional
-            Number of frames in a training example. Defaults to 1.
-        start : int, optional
-            Starting index of the sequences to use. Defaults to 0.
-        stop : int, optional
-            Ending index of the sequences to use. Defaults to `None`, meaning
-            sequences are selected all the way to the end of the array.
-        audio_only : bool, optional
-            Whether to load only the raw audio and no auxiliary information.
-            Defaults to `False`.
-        rng : object, optional
-            A random number generator used for picking random indices into the
-            design matrix when choosing minibatches.
-        """
-        assert frame_length==1 # Longer frame length implemented through output_frames_per_example
-        self.frame_length = 1#frame_length
-        self.overlap = overlap
-        self.frames_per_example = frames_per_example
-        self.output_frames_per_example = output_frames_per_example
-        self.offset = self.frame_length - self.overlap
-        self.audio_only = audio_only
-        self.noise = noise
-        self.noise_decay = noise_decay
-        self.speaker_filter = speaker_filter
-        self.phone_filter = phone_filter
-        self.mid_third = mid_third
-        self.use_examples = None
+                 frame_length = 240,
+                 stft = False):
+        self.__dict__.update(locals())
+        del self.self
 
-        # RNG initialization
-        if hasattr(rng, 'random_integers'):
-            self.rng = rng
-        else:
-            self.rng = numpy.random.RandomState(rng)
-
-        # Load data from disk
-        if which_set=='train_train' or which_set=='train_valid':
-            self._load_data('train') # In this case we further split the training from disk into a training set and a validation set
-        else:
-            self._load_data(which_set)
-        
-        # Slice data
-        if stop is None:
-            stop = len(self.raw_wav)
-        self.raw_wav = self.raw_wav[start:stop]
-        if not self.audio_only:
-            self.phone_nums    = self.phone_nums[start:stop]
-            self.phone_offsets = self.phone_offsets[start:stop]
-            #self.phonemes = self.phonemes[start:stop]
-            #self.words = self.words[start:stop]
-        
-        # filter based on speaker
-        if self.speaker_filter != None:
-            keep_indices = []
-            for i,sid in enumerate(self.speaker_id):
-                if sid in self.speaker_filter:
-                    keep_indices.append(i)
-            self.raw_wav       = self.raw_wav[keep_indices]
-            self.phone_nums    = self.phone_nums[keep_indices]
-            self.phone_offsets = self.phone_offsets[keep_indices]
-            self.speaker_id    = self.speaker_id[keep_indices]
-
-         # Filter out phones that we do not want to include (making a new sequence for each phone we do include)
-        if self.phone_filter != None :
-            new_raw_wav = []
-            new_phone_nums = []
-            new_phone_offsets = []
-            new_speaker_id = []
-            for sequence_id, phn_nums in enumerate(self.phone_nums):
-                for phn_idx, phn_num in enumerate( phn_nums ):
-                    if phn_num in self.phone_filter:
-                        phn_start = self.phone_offsets[sequence_id][phn_idx]
-                        phn_end   = (list(self.phone_offsets[sequence_id]) + [len(self.raw_wav[sequence_id])-1])[phn_idx+1]
-                        if self.mid_third == True:
-                            phn_start, phn_end = (phn_start + (phn_end-phn_start)/4, phn_end - (phn_end - phn_start)/4)
-                        if phn_start+self.frames_per_example<phn_end:
-                            new_raw_wav.append   (  self.raw_wav[sequence_id][phn_start:phn_end]  )
-                            new_phone_nums.append(  numpy.array([phn_num]) )
-                            new_phone_offsets.append( numpy.array([0]) )
-                            new_speaker_id.append( self.speaker_id[sequence_id] )
-            self.raw_wav = new_raw_wav
-            self.phone_nums = new_phone_nums
-            self.phone_offsets = new_phone_offsets
-            self.speaker_id = new_speaker_id
-        
-        examples_per_sequence = [0] + map( lambda x: len(x) - self.frames_per_example - self.output_frames_per_example + 1, self.raw_wav )
-        
-        self.cumulative_example_indexes = numpy.cumsum(examples_per_sequence)        
-        self.num_examples = self.cumulative_example_indexes[-1]
-
-        # If requested, make further split of disk training set (only works well if the number of examples is small)
-        if which_set =='train_train' or which_set=='train_valid':
-            digit = numpy.digitize(range(self.num_examples), self.cumulative_example_indexes) - 1
-            ex_indices = zip(digit, numpy.array(range(self.num_examples)) - self.cumulative_example_indexes[digit])
-            numpy.random.shuffle( ex_indices )
-            if which_set == 'train_train':
-                self.use_indices = ex_indices[:int(self.num_examples*0.8)]
-            elif which_set=='train_valid':
-                self.use_indices = ex_indices[int(self.num_examples*0.8):]
-            self.num_examples = len(self.use_indices)
-
-        print "number of examples", self.num_examples
-            
-        self.samples_sequences = self.raw_wav
-
-        # DataSpecs
-        features_space = VectorSpace(
-            dim=self.frame_length * self.frames_per_example
-        )
-        features_source = 'features'
-        def features_map_fn(indices, batch_buffer):            
-            for i, (sequence_index, example_index) in enumerate(self._fetch_index(indices)):
-                batch_buffer[i,:] = self.samples_sequences[sequence_index][example_index:example_index
-                                                                           + self.frames_per_example].ravel()
-            batch_buffer[:,:] = (batch_buffer - TIMITOnTheFly._mean) / TIMITOnTheFly._std # Modify in place
-        
-        if self.noise_decay==False:
-            self.noiseprofile = numpy.ones( (1, self.frames_per_example) )
-        else:
-            self.noiseprofile = numpy.linspace( 1, 0, self.frames_per_example ).reshape( (1,self.frames_per_example ) )
-        
-        def features_map_fn_noise(indices, batch_buffer):
-            features_map_fn(indices, batch_buffer )
-            if isinstance(self.noise,float):
-                batch_buffer[:,:] = batch_buffer + numpy.random.normal( 0, self.noise, batch_buffer.shape )*self.noiseprofile # Modify in place
-            elif isinstance(self.noise,list):
-                #noises = numpy.random.choice( self.noise, (batch_buffer.shape[0], 1) ) LisaLab does not have numpy 1.7.0 yet
-                noises = numpy.array(self.noise).reshape( (len(self.noise), 1) )[ numpy.random.randint( 0, len(self.noise), batch_buffer.shape[0] ) ]
-                batch_buffer[:,:] = batch_buffer + numpy.random.normal( 0, 1, batch_buffer.shape )*noises*self.noiseprofile # Modify in place
-                    
-        targets_space = VectorSpace(dim=self.frame_length*self.output_frames_per_example)
-        targets_source = 'targets'
-        def targets_map_fn(indices, batch_buffer):
-            for i, (sequence_index, example_index) in enumerate(self._fetch_index(indices)):
-                batch_buffer[i,:] = self.samples_sequences[sequence_index][example_index + self.frames_per_example
-                                                                           :example_index + self.frames_per_example + self.output_frames_per_example].ravel()
-            batch_buffer[:,:] = (batch_buffer - TIMITOnTheFly._mean) / TIMITOnTheFly._std # Modify in place
-
-        space_components = [features_space, targets_space]
-        source_components = [features_source, targets_source]
-        if self.noise == False:
-            map_fn_components = [features_map_fn, targets_map_fn]
-        else:
-            map_fn_components = [features_map_fn_noise, targets_map_fn]
-        batch_components = [None, None]
-
-        if not self.audio_only:
-            num_phones = 62
-            phones_space = IndexSpace(max_labels=num_phones, dim=1,
-                                      dtype=str(self.phone_nums[0].dtype))
-            phones_source = 'phones'
-            def phones_map_fn(indices, batch_buffer):
-                for i, (sequence_index, example_index) in enumerate(self._fetch_index(indices)):
-                    digit = numpy.digitize([example_index + self.frames_per_example], self.phone_offsets[sequence_index])[0] - 1
-                    batch_buffer[i,0] =  self.phone_nums[sequence_index][digit]
-
-#            num_phonemes = numpy.max([numpy.max(sequence) for sequence
-                                      #in self.phonemes]) + 1
-#            phonemes_space = IndexSpace(max_labels=num_phonemes, dim=1,
-#                                        dtype=str(self.phonemes_sequences[0].dtype))
-#            phonemes_source = 'phonemes'
-#            def phonemes_map_fn(indexes):
-#                rval = []
-#                for sequence_index, example_index in self._fetch_index(indexes):
-#                    rval.append(self.phonemes_sequences[sequence_index][example_index
-#                        + self.frames_per_example].ravel())
-#                return rval
-
-#            num_words = numpy.max([numpy.max(sequence) for sequence
-#                                   in self.words]) + 1
-#            words_space = IndexSpace(max_labels=num_words, dim=1,
-                                     #dtype=str(self.words_sequences[0].dtype))
-#            words_source = 'words'
-#            def words_map_fn(indexes):
-#                rval = []
-#                for sequence_index, example_index in self._fetch_index(indexes):
-#                    rval.append(self.words_sequences[sequence_index][example_index
-#                        + self.frames_per_example].ravel())
-#                return rval
-
-            space_components.extend([phones_space])#, phonemes_space,
-                                     #words_space])
-            source_components.extend([phones_source])#, phonemes_source,
-                                     #words_source])            
-            map_fn_components.extend([phones_map_fn])#, phonemes_map_fn,
-                                     #words_map_fn])
-            batch_components.extend([None])#, None, None])
-
-        space = CompositeSpace(space_components)
-        source = tuple(source_components)
-        self.data_specs = (space, source)
-        self.map_functions = tuple(map_fn_components)
-        self.batch_buffers = batch_components
-
-        # Defaults for iterators
-        self._iter_mode = resolve_iterator_class('shuffled_sequential')
-        self._iter_data_specs = (CompositeSpace((features_space,
-                                                 targets_space)),
-                                 (features_source, targets_source))
-
-    def _fetch_index(self, indices):
-        if self.use_examples == None:
-            digit = numpy.digitize(indices, self.cumulative_example_indexes) - 1
-            return zip(digit,
-                       numpy.array(indices) - self.cumulative_example_indexes[digit])
-        else:
-            return self.use_examples[ indices ]            
-
+        ## Load data from disk
+        #if which_set=='train_train' or which_set=='train_valid':
+        #    self._load_data('train') # In this case we further split the training from disk into a training set and a validation set
+        #else:
+        # Load data into memory
+        self._load_data(which_set)
+        # Process data
+        self.slice_data() 
+        if self.speaker_filter!=None:
+            self.filter_speakers()
+        if self.phone_filter!=None:
+            self.filter_phones()
+        if self.stft==True:
+            self.filter_based_on_frame_length()
+            self.compute_stft()
+    
     def _load_data(self, which_set):
         """
         Load the TIMIT data from disk.
@@ -320,6 +111,304 @@ class TIMITOnTheFly(Dataset):
             #self.phones = serial.load(phones_path)
             #self.words = serial.load(words_path)
             self.speaker_id = numpy.asarray(serial.load(speaker_path), 'int')
+            
+    def slice_data( self ):
+        if self.stop is None:
+            self.stop = len(self.raw_wav)
+        self.raw_wav = self.raw_wav[self.start:self.stop]
+        if not self.audio_only:
+            self.phone_nums    = self.phone_nums[self.start:self.stop]
+            self.phone_offsets = self.phone_offsets[self.start:self.stop]
+            #self.phonemes = self.phonemes[start:stop]
+            #self.words = self.words[start:stop]
+    
+    def filter_speakers( self ): # keep only utterances by some speakers
+        if self.speaker_filter != None:
+            keep_indices = []
+            for i,sid in enumerate(self.speaker_id):
+                if sid in self.speaker_filter:
+                    keep_indices.append(i)
+            self.raw_wav       = self.raw_wav[keep_indices]
+            self.phone_nums    = self.phone_nums[keep_indices]
+            self.phone_offsets = self.phone_offsets[keep_indices]
+            self.speaker_id    = self.speaker_id[keep_indices]
+    
+    def filter_phones( self ): # Filter out phones that we do not want to include (making a new sequence for each phone we do include)
+        if self.phone_filter != None :
+            new_raw_wav = []
+            new_phone_nums = []
+            new_phone_offsets = []
+            new_speaker_id = []
+            for sequence_id, phn_nums in enumerate(self.phone_nums):
+                for phn_idx, phn_num in enumerate( phn_nums ):
+                    if phn_num in self.phone_filter:
+                        phn_start = self.phone_offsets[sequence_id][phn_idx]
+                        phn_end   = (list(self.phone_offsets[sequence_id]) + [len(self.raw_wav[sequence_id])-1])[phn_idx+1]
+                        if self.mid_third == True:
+                            phn_start, phn_end = (phn_start + (phn_end-phn_start)/4, phn_end - (phn_end - phn_start)/4)
+                        if phn_start+self.frames_per_example<phn_end:
+                            new_raw_wav.append   (  self.raw_wav[sequence_id][phn_start:phn_end]  )
+                            new_phone_nums.append(  numpy.array([phn_num]) )
+                            new_phone_offsets.append( numpy.array([0]) )
+                            new_speaker_id.append( self.speaker_id[sequence_id] )
+            self.raw_wav = new_raw_wav
+            self.phone_nums = new_phone_nums
+            self.phone_offsets = new_phone_offsets
+            self.speaker_id = new_speaker_id
+    
+    def filter_based_on_frame_length( self ): # Filter out all utterances that are shorter than frame length
+        idcs_to_delete = []
+        for i,utterance in enumerate(self.raw_wav):
+            if len(utterance)<self.frame_length:
+                idcs_to_delete.append( i )
+        for i in reversed( idcs_to_delete ):
+            del self.raw_wav[i]
+            del self.phone_nums[i]
+            del self.phone_offsets[i]
+            del self.speaker_id[i]
+
+    def compute_stft( self ):
+        # Replace each utterance with its stft with window length self.frame_length
+        delete_idcs = []
+        for i,utterance in enumerate(self.raw_wav):
+            frames = segment_axis( self.raw_wav[i], length=self.frame_length, overlap=0 )
+            self.raw_wav[i] = numpy.fft.rfft( frames )
+
+
+class TIMITXAmpYPhase(DenseDesignMatrix):
+    # A dataclass for predicting phases (as x,y of points on unit circle) from amplitudes
+    def __init__( self,
+                  which_set,
+                  start=0,
+                  stop=None,
+                  speaker_filter = None,
+                  phone_filter = None,
+                  frame_length = 241):
+        self.__dict__.update(locals())
+        del self.self
+        timit_data = TIMITData( which_set, start, stop, audio_only=True, speaker_filter=speaker_filter, phone_filter=phone_filter, stft=True )
+        
+        assert frame_length%2==1 # Want odd window so that highest frequency fourier coefficient is not constrained to be real
+        
+        num_examples = sum( map( lambda x: len(x), timit_data.raw_wav ) )
+        fourier_rep_frame_length = len(timit_data.raw_wav[0][0])
+        X = numpy.zeros( (num_examples, fourier_rep_frame_length - 1), dtype='float32' ) # Do not include first coefficient
+        y = numpy.zeros( (num_examples, 2*(fourier_rep_frame_length - 1) ), dtype='float32' ) # Do not include first coefficient
+        
+        timit_data.raw_wav = list(timit_data.raw_wav)
+        examples_added = 0
+        for i in reversed(range(len(timit_data.raw_wav))):
+            wav = timit_data.raw_wav.pop() # Try to save a bit of memory by removing
+            for j in range(len(wav)):
+                X[examples_added,:] = numpy.abs( wav[j][1:] ) # amplitudes
+                normalized = wav[j][1:]/X[examples_added,:]
+                y[examples_added,:fourier_rep_frame_length-1] = numpy.real(normalized)
+                y[examples_added,fourier_rep_frame_length-1:] = numpy.imag(normalized)
+                examples_added+=1
+        del timit_data
+        
+        super(TIMITXAmpYPhase, self).__init__(X=X, y=y)
+
+class TIMITOnTheFly(Dataset):
+    """
+    Frame-based TIMIT dataset
+    """
+    _default_seed = (17, 2, 946)
+
+    # Mean and standard deviation of the acoustic samples from the whole
+    # dataset (train, valid, test).
+    _mean = 0.0035805809921434142
+    _std = 542.48824133746177
+
+    def __init__(self, which_set, frame_length,
+                 #overlap=0,
+                 frames_per_example=1, # Important mostly when using fourier representation, in which case this is the window size
+                 output_frames_per_example=1,
+                 start=0,
+                 stop=None,
+                 audio_only=False,
+                 representation='time', # or 'freq'
+                 rng=_default_seed,
+                 noise = False,
+                 noise_decay = False,
+                 speaker_filter = None,
+                 phone_filter = None,
+                 mid_third = False):
+        """
+        Parameters
+        ----------
+        which_set : str
+            Either "train", "valid" or "test"
+        frame_length : int
+            Number of acoustic samples contained in a frame
+        overlap : int, optional
+            Number of overlapping acoustic samples for two consecutive frames.
+            Defaults to 0, meaning frames don't overlap.
+        frames_per_example : int, optional
+            Number of frames in a training example. Defaults to 1.
+        start : int, optional
+            Starting index of the sequences to use. Defaults to 0.
+        stop : int, optional
+            Ending index of the sequences to use. Defaults to `None`, meaning
+            sequences are selected all the way to the end of the array.
+        audio_only : bool, optional
+            Whether to load only the raw audio and no auxiliary information.
+            Defaults to `False`.
+        rng : object, optional
+            A random number generator used for picking random indices into the
+            design matrix when choosing minibatches.
+        """
+        assert frame_length==1 # Longer frame length implemented through output_frames_per_example
+        self.timit_data = TIMITData( which_set, start, stop, audio_only, speaker_filter, phone_filter )
+        
+        self.frame_length = 1#frame_length
+        #self.overlap = overlap
+        self.frames_per_example = frames_per_example
+        self.output_frames_per_example = output_frames_per_example
+        self.offset = self.frame_length# - self.overlap
+        self.audio_only = audio_only
+        self.noise = noise
+        self.noise_decay = noise_decay
+        #self.speaker_filter = speaker_filter
+        #self.phone_filter = phone_filter
+        self.mid_third = mid_third
+        self.use_examples = None
+        #self.start = start
+        #self.stop = stop
+        self.representation = representation
+        
+        assert not self.representation=='freq' and self.audio_only==False # Phone map not implemented yet for Fourier data
+
+        # RNG initialization
+        if hasattr(rng, 'random_integers'):
+            self.rng = rng 
+        else:
+            self.rng = numpy.random.RandomState(rng)
+        
+
+        if self.domain=='freq':
+            self.compute_stft() 
+        
+        # Offset data for mapping example index to example
+        examples_per_sequence = [0] + map( lambda x: len(x) - self.frames_per_example - self.output_frames_per_example + 1, self.raw_wav )
+        self.cumulative_example_indexes = numpy.cumsum(examples_per_sequence)        
+        self.num_examples = self.cumulative_example_indexes[-1]
+        
+        ## If requested, make further split of disk training set (only works well if the number of examples is small)
+        #if which_set =='train_train' or which_set=='train_valid':
+        #    digit = numpy.digitize(range(self.num_examples), self.cumulative_example_indexes) - 1
+        #    ex_indices = zip(digit, numpy.array(range(self.num_examples)) - self.cumulative_example_indexes[digit])
+        #    numpy.random.shuffle( ex_indices )
+        #    if which_set == 'train_train':
+        #        self.use_indices = ex_indices[:int(self.num_examples*0.8)]
+        #    elif which_set=='train_valid':
+        #        self.use_indices = ex_indices[int(self.num_examples*0.8):]
+        #    self.num_examples = len(self.use_indices)
+
+        print "number of examples", self.num_examples
+            
+        self.samples_sequences = self.data.raw_wav
+
+        # DataSpecs
+        features_space = VectorSpace( dim=self.frame_length * self.frames_per_example )
+        features_source = 'features'
+        targets_space = VectorSpace( dim=self.frame_length*self.output_frames_per_example )
+        targets_source = 'targets'
+        
+        # Functions for fetching the X of an example
+        def features_map_fn(indices, batch_buffer):
+            for i, (sequence_index, example_index) in enumerate(self._fetch_index(indices)):
+                batch_buffer[i,:] = self.samples_sequences[sequence_index][example_index:example_index+self.frames_per_example].ravel()
+            batch_buffer[:,:] = (batch_buffer - TIMITOnTheFly._mean) / TIMITOnTheFly._std # Modify in place
+        
+        if self.noise_decay==False:
+            self.noiseprofile = numpy.ones( (1, self.frames_per_example) )
+        else:
+            self.noiseprofile = numpy.linspace( 1, 0, self.frames_per_example ).reshape( (1,self.frames_per_example ) )
+        
+        def features_map_fn_noise(indices, batch_buffer):
+            features_map_fn(indices, batch_buffer )
+            if isinstance(self.noise,float):
+                batch_buffer[:,:] = batch_buffer + numpy.random.normal( 0, self.noise, batch_buffer.shape )*self.noiseprofile # Modify in place
+            elif isinstance(self.noise,list):
+                #noises = numpy.random.choice( self.noise, (batch_buffer.shape[0], 1) ) LisaLab does not have numpy 1.7.0 yet
+                noises = numpy.array(self.noise).reshape( (len(self.noise), 1) )[ numpy.random.randint( 0, len(self.noise), batch_buffer.shape[0] ) ]
+                batch_buffer[:,:] = batch_buffer + numpy.random.normal( 0, 1, batch_buffer.shape )*noises*self.noiseprofile # Modify in place
+        
+        # Functions for fetching the y of an xample
+        def targets_map_fn(indices, batch_buffer):
+            for i, (sequence_index, example_index) in enumerate(self._fetch_index(indices)):
+                batch_buffer[i,:] = self.samples_sequences[sequence_index][example_index + self.frames_per_example
+                                                                           :example_index + self.frames_per_example + self.output_frames_per_example].ravel()
+            batch_buffer[:,:] = (batch_buffer - TIMITOnTheFly._mean) / TIMITOnTheFly._std # Modify in place
+
+        space_components = [features_space, targets_space]
+        source_components = [features_source, targets_source]
+        if self.noise == False:
+            map_fn_components = [features_map_fn, targets_map_fn]
+        else:
+            map_fn_components = [features_map_fn_noise, targets_map_fn]
+        batch_components = [None, None]
+
+        if not self.audio_only:
+            num_phones = 62
+            phones_space = IndexSpace(max_labels=num_phones, dim=1, dtype=str(self.phone_nums[0].dtype))
+            phones_source = 'phones'
+            def phones_map_fn(indices, batch_buffer):
+                for i, (sequence_index, example_index) in enumerate(self._fetch_index(indices)):
+                    digit = numpy.digitize([example_index + self.frames_per_example], self.phone_offsets[sequence_index])[0] - 1
+                    batch_buffer[i,0] =  self.phone_nums[sequence_index][digit]
+
+#            num_phonemes = numpy.max([numpy.max(sequence) for sequence
+                                      #in self.phonemes]) + 1
+#            phonemes_space = IndexSpace(max_labels=num_phonemes, dim=1,
+#                                        dtype=str(self.phonemes_sequences[0].dtype))
+#            phonemes_source = 'phonemes'
+#            def phonemes_map_fn(indexes):
+#                rval = []
+#                for sequence_index, example_index in self._fetch_index(indexes):
+#                    rval.append(self.phonemes_sequences[sequence_index][example_index
+#                        + self.frames_per_example].ravel())
+#                return rval
+
+#            num_words = numpy.max([numpy.max(sequence) for sequence
+#                                   in self.words]) + 1
+#            words_space = IndexSpace(max_labels=num_words, dim=1,
+                                     #dtype=str(self.words_sequences[0].dtype))
+#            words_source = 'words'
+#            def words_map_fn(indexes):
+#                rval = []
+#                for sequence_index, example_index in self._fetch_index(indexes):
+#                    rval.append(self.words_sequences[sequence_index][example_index
+#                        + self.frames_per_example].ravel())
+#                return rval
+
+            space_components.extend([phones_space])#, phonemes_space,
+                                     #words_space])
+            source_components.extend([phones_source])#, phonemes_source,
+                                     #words_source])            
+            map_fn_components.extend([phones_map_fn])#, phonemes_map_fn,
+                                     #words_map_fn])
+            batch_components.extend([None])#, None, None])
+
+        space = CompositeSpace(space_components)
+        source = tuple(source_components)
+        self.data_specs = (space, source)
+        self.map_functions = tuple(map_fn_components)
+        self.batch_buffers = batch_components
+
+        # Defaults for iterators
+        self._iter_mode = resolve_iterator_class('shuffled_sequential')
+        self._iter_data_specs = (CompositeSpace((features_space, targets_space)),
+                                 (features_source, targets_source))
+
+    def _fetch_index(self, indices):
+        if self.use_examples == None:
+            digit = numpy.digitize(indices, self.cumulative_example_indexes) - 1
+            return zip(digit,
+                       numpy.array(indices) - self.cumulative_example_indexes[digit])
+        else:
+            return self.use_examples[ indices ]            
 
     def _validate_source(self, source):
         """
@@ -744,13 +833,13 @@ class TIMITOnTheFly(Dataset):
                                      #convert=convert)
 
 
-if __name__ == "__main__":
-    valid_timit = TIMITSequences("valid", frame_length=100, audio_only=False)
-    data_specs = (CompositeSpace([VectorSequenceSpace(window_dim=100),
-                                  VectorSequenceSpace(window_dim=1),
-                                  VectorSequenceSpace(window_dim=62)]),
-                  ('features', 'targets', 'phones'))
-    it = valid_timit.iterator(mode='sequential', data_specs=data_specs,
-                              num_batches=10, batch_size=1)
-    for rval in it:
-        print [val.shape for val in rval]
+#if __name__ == "__main__":
+#    valid_timit = TIMITSequences("valid", frame_length=100, audio_only=False)
+#    data_specs = (CompositeSpace([VectorSequenceSpace(window_dim=100),
+#                                  VectorSequenceSpace(window_dim=1),
+#                                  VectorSequenceSpace(window_dim=62)]),
+#                  ('features', 'targets', 'phones'))
+#    it = valid_timit.iterator(mode='sequential', data_specs=data_specs,
+#                              num_batches=10, batch_size=1)
+#    for rval in it:
+#        print [val.shape for val in rval]
