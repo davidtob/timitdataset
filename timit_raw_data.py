@@ -169,7 +169,9 @@ class TIMITRawData(object):
 
     def compute_stft( self ):
         # Replace each utterance with its stft with window length self.frame_length
+        print "Computing STFT"
         delete_idcs = []
         for i,utterance in enumerate(self.raw_wav):
             frames = segment_axis( self.raw_wav[i], length=self.frame_length, overlap=0 )
             self.raw_wav[i] = numpy.fft.rfft( frames )
+        print "Done"
