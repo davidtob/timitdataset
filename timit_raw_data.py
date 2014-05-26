@@ -14,7 +14,7 @@ import functools
 import numpy
 from pylearn2.utils.iteration import resolve_iterator_class, RandomUniformSubsetIterator
 from pylearn2.datasets.dataset import Dataset
-from pylearn2.space import CompositeSpace, VectorSpace, IndexSpace
+from pylearn2.space import CompositeSpace, VectorSpace #, IndexSpace
 #from research.code.pylearn2.space import (
 #    VectorSequenceSpace,
 #    IndexSequenceSpace
