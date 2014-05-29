@@ -98,7 +98,7 @@ class TIMITPhaseFromAmp(DenseDesignMatrix):
                 
     def to_audio( self, amplitudes, phases ):
         assert amplitudes.shape[0]==phases.shape[0]
-        rawamplitudes = numpy.exp ( amplitudes*self._log_amp_std + self._log_amp_mean )
+        rawamplitudes = numpy.exp( amplitudes*self._log_amp_std + self._log_amp_mean )
         realphases = phases[:,:self.fourier_rep_frame_length-1]
         imphases = phases[:,self.fourier_rep_frame_length-1:]
         coeffs = numpy.hstack( (numpy.zeros( (amplitudes.shape[0],1) ),rawamplitudes*(realphases + 1j*imphases) ) )
