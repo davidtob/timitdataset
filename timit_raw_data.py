@@ -27,17 +27,26 @@ from pylearn2.datasets import DenseDesignMatrix
 import scipy.stats
 
 class TIMITRawData(object):
+    # Mean and standard deviation of the acoustic samples from the whole
+    # dataset (train, valid, test).
+    _mean = 0.0035805809921434142
+    _std = 542.48824133746177
+    
     def __init__(self,
                  which_set,
                  start=0,
                  stop=None,
                  audio_only=False,
+                 normalize = False,
                  speaker_filter = None,
                  phone_filter = None,
-                 frame_length = 240,
+                 frame_length = None, # if a number replace sentences by frames of this length
+                 overlap = 0,
                  stft = False):
         self.__dict__.update(locals())
         del self.self
+        
+        assert not (stft==True and frame_length==None)
 
         ## Load data from disk
         #if which_set=='train_train' or which_set=='train_valid':
@@ -46,13 +55,17 @@ class TIMITRawData(object):
         # Load data into memory
         self._load_data(which_set)
         # Process data
-        self.slice_data() 
+        self.slice_data()
+        if self.normalize==True:
+            self.normalize_utternaces()
         if self.speaker_filter!=None:
             self.filter_speakers()
         if self.phone_filter!=None:
             self.filter_phones()
-        if self.stft==True:
+        if self.frame_length!=None:
             self.filter_based_on_frame_length()
+            self.replace_with_frames()
+        if self.stft==True:
             self.compute_stft()
     
     def _load_data(self, which_set):
@@ -167,11 +180,18 @@ class TIMITRawData(object):
             del self.phone_offsets[i]
             del self.speaker_id[i]
 
+    def normalize_utternaces( self ):
+        for i in range(len(self.raw_wav)):
+            self.raw_wav[i] = (self.raw_wav[i] - self._mean)/self._std
+    
+    def replace_with_frames( self ):
+        for i in range(len(self.raw_wav)):
+            frames = segment_axis( self.raw_wav[i], length=self.frame_length, overlap=self.overlap )
+            self.raw_wav[i] = frames
+
     def compute_stft( self ):
         # Replace each utterance with its stft with window length self.frame_length
         print "Computing STFT"
-        delete_idcs = []
-        for i,utterance in enumerate(self.raw_wav):
-            frames = segment_axis( self.raw_wav[i], length=self.frame_length, overlap=0 )
-            self.raw_wav[i] = numpy.fft.rfft( frames )
+        for i in range(len(self.raw_wav)):
+            self.raw_wav[i] = numpy.fft.rfft( self.raw_wav[i] )
         print "Done"
