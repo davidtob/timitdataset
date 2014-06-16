@@ -15,21 +15,27 @@ class TIMITFrames(DenseDesignMatrix):
                  speaker_filter = None,
                  phone_filter = None,
                  frame_length = 240,
-                 hahn_window = False):
+                 hahn_window = None,
+                 hann_window = False,
+                 num_windows = 1):
 #                 stft = False):
+        if hahn_window!=None:
+            hann_window = hahn_window
+        del hahn_window
         self.__dict__.update(locals())
         del self.self
-        if self.hahn_window:
+        if self.hann_window:
             assert frame_length%2==0
-            overlap = frame_length/2 
+            self.overlap = frame_length/2 
         else:
-            overlap = 0
+            self.overlap = 0
+            assert num_windows == 1
         self.timit_data = TIMITRawData( which_set=which_set, start=start, stop=stop, audio_only=audio_only, normalize=normalize,
-                                   overlap=overlap, speaker_filter=speaker_filter, phone_filter=phone_filter, frame_length=frame_length, stft = False )
+                                   overlap=self.overlap, speaker_filter=speaker_filter, phone_filter=phone_filter, frame_length=frame_length + (num_windows-1)*self.overlap, stft = False )
     
         num_examples = sum( map( lambda x: len(x), self.timit_data.raw_wav ) )
         if self.stop_examples!=None:
-            self.stop_examples = min( num_examples, self.stop_examples )            
+            self.stop_examples = min( num_examples, self.stop_examples )
         else:
             self.stop_examples = num_examples
             
@@ -40,13 +46,13 @@ class TIMITFrames(DenseDesignMatrix):
         X = self.create_X()
         del self.timit_data
         
-        if self.hahn_window:
-            X = self.apply_hahn( X )
+        if self.hann_window:
+            X = self.apply_hann( X )
 
         super(TIMITFrames, self).__init__(X=X)# y=y)
     
     def create_X( self ):
-        X = numpy.zeros( (self.stop_examples - self.start_examples, self.frame_length), dtype='float32' )
+        X = numpy.zeros( (self.stop_examples - self.start_examples, self.frame_length + (self.num_windows-1)*self.overlap), dtype='float32' )
         self.timit_data.raw_wav = list(self.timit_data.raw_wav)
         examples = 0
         for i in range(len(self.timit_data.raw_wav)):
@@ -59,8 +65,11 @@ class TIMITFrames(DenseDesignMatrix):
                 examples+=1
         return X
     
-    def apply_hahn( self, X ):
-        hahn = 0.5 - 0.5*numpy.cos( 2*numpy.pi*numpy.arange( self.frame_length )/(self.frame_length-1) )
-        return X*hahn        
+    def apply_hann( self, X ):
+        hann = 0.5 - 0.5*numpy.cos( 2*numpy.pi*numpy.linspace(0, 1-1/float(self.frame_length), self.frame_length) )
+        if self.num_windows>1:
+            tiled_hann = numpy.hstack( ( numpy.zeros( (self.overlap,) ), numpy.tile( hann, numpy.ceil(self.num_windows/2.0) ), numpy.zeros( (self.overlap,) ) ) )
+            hann = tiled_hann[self.overlap:] + tiled_hann[:-self.overlap]
+        return X*hann
         
         
